@@ -4,7 +4,6 @@ use crate::log::Event::*;
 use crate::log::Logger;
 use crate::sleep::Sleep;
 use crate::unwind;
-use crate::util::leak;
 use crate::{
     ErrorKind, ExitHandler, PanicHandler, StartHandler, ThreadPoolBuildError, ThreadPoolBuilder,
 };
@@ -159,15 +158,20 @@ pub(super) struct Registry {
 /// ////////////////////////////////////////////////////////////////////////
 /// Initialization
 
-static mut THE_REGISTRY: Option<&'static Arc<Registry>> = None;
+static mut THE_REGISTRY: Option<Arc<Registry>> = None;
 static THE_REGISTRY_SET: Once = Once::new();
 
 /// Starts the worker threads (if that has not already happened). If
 /// initialization has not already occurred, use the default
 /// configuration.
-fn global_registry() -> &'static Arc<Registry> {
+fn global_registry() -> Arc<Registry> {
     set_global_registry(|| Registry::new(ThreadPoolBuilder::new()))
-        .or_else(|err| unsafe { THE_REGISTRY.ok_or(err) })
+        .or_else(|err| unsafe {
+            THE_REGISTRY
+                .as_ref()
+                .map(|registry| registry.clone())
+                .ok_or(err)
+        })
         .expect("The global thread pool has not been initialized.")
 }
 
@@ -175,7 +179,7 @@ fn global_registry() -> &'static Arc<Registry> {
 /// the given builder.
 pub(super) fn init_global_registry<S>(
     builder: ThreadPoolBuilder<S>,
-) -> Result<&'static Arc<Registry>, ThreadPoolBuildError>
+) -> Result<Arc<Registry>, ThreadPoolBuildError>
 where
     S: ThreadSpawn,
 {
@@ -184,7 +188,7 @@ where
 
 /// Starts the worker threads (if that has not already happened)
 /// by creating a registry with the given callback.
-fn set_global_registry<F>(registry: F) -> Result<&'static Arc<Registry>, ThreadPoolBuildError>
+fn set_global_registry<F>(registry: F) -> Result<Arc<Registry>, ThreadPoolBuildError>
 where
     F: FnOnce() -> Result<Arc<Registry>, ThreadPoolBuildError>,
 {
@@ -193,9 +197,8 @@ where
     ));
     THE_REGISTRY_SET.call_once(|| {
         result = registry().map(|registry| {
-            let registry = leak(registry);
             unsafe {
-                THE_REGISTRY = Some(registry);
+                THE_REGISTRY = Some(registry.clone());
             }
             registry
         });
